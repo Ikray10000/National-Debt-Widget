@@ -1,0 +1,141 @@
+// Scriptable — U.S. National Debt Widget (corrected endpoint) vs
+
+const API_URL = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/debt_to_penny?fields=record_date,tot_pub_debt_out_amt&sort=-record_date&page[size]=1&format=json";
+const CACHE_FILE = "us_debt_widget_cache.json";
+
+async function fetchDebt() {
+  let txt = null;
+  try {
+    let req = new Request(API_URL);
+    req.headers = {
+      "Accept": "application/json",
+      "User-Agent": "Scriptable"
+    };
+    txt = await req.loadString();
+    let json = JSON.parse(txt);
+
+    let record = json.data && json.data.length > 0 ? json.data[0] : null;
+    if (!record) throw new Error("No 'data' array in response.");
+
+    let date = record.record_date || null;
+    let amountStr = record.tot_pub_debt_out_amt || null;
+
+    if (!amountStr) {
+      if (record.attributes) {
+        for (let k in record.attributes) {
+          if (k.toLowerCase().includes("debt")) {
+            amountStr = record.attributes[k];
+            break;
+          }
+        }
+      }
+      if (!amountStr) throw new Error("Debt amount missing in response.");
+    }
+
+    amountStr = String(amountStr).replace(/[^0-9.\-]+/g, "");
+    const amount = Number(amountStr);
+    if (!isFinite(amount)) throw new Error("Invalid numeric debt amount.");
+
+    return { date, amount };
+  } catch (e) {
+    console.log("fetchDebt error:", e);
+    if (txt) console.log("Response snippet:", txt.slice(0, 400));
+    return null;
+  }
+}
+
+function saveCache(obj) {
+  try {
+    const fm = FileManager.local();
+    const path = fm.joinPath(fm.documentsDirectory(), CACHE_FILE);
+    fm.writeString(
+      path,
+      JSON.stringify({ fetchedAt: new Date().toISOString(), ...obj })
+    );
+  } catch (e) {
+    console.log("saveCache error:", e);
+  }
+}
+
+function loadCache() {
+  try {
+    const fm = FileManager.local();
+    const path = fm.joinPath(fm.documentsDirectory(), CACHE_FILE);
+    if (!fm.fileExists(path)) return null;
+    return JSON.parse(fm.readString(path));
+  } catch (e) {
+    console.log("loadCache error:", e);
+    return null;
+  }
+}
+
+function formatCurrency(num) {
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0
+    }).format(num);
+  } catch {
+    return "$" + Math.round(num)
+      .toString()
+      .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+}
+
+async function createWidget() {
+  const widget = new ListWidget();
+  widget.backgroundColor = new Color("#242424");
+  widget.setPadding(12, 12, 12, 12);
+
+  const title = widget.addText("U.S. National Debt");
+  title.font = Font.semiboldSystemFont(14);
+  title.textColor = Color.white();
+  widget.addSpacer(8);
+
+  const debtData = await fetchDebt();
+
+  if (debtData && debtData.amount) {
+    saveCache(debtData);
+    const amt = widget.addText(formatCurrency(debtData.amount));
+    amt.font = Font.boldSystemFont(28);
+    amt.textColor = Color.green();
+    widget.addSpacer(4);
+    const dateTxt = widget.addText(`As of ${debtData.date}`);
+    dateTxt.font = Font.systemFont(11);
+    dateTxt.textColor = Color.gray();
+  } else {
+    const cached = loadCache();
+    if (cached && cached.amount) {
+      const amt = widget.addText(formatCurrency(cached.amount));
+      amt.font = Font.boldSystemFont(20);
+      amt.textColor = Color.orange();
+      widget.addSpacer(4);
+      const note = widget.addText(
+        `Cached (fetched ${new Date(cached.fetchedAt).toLocaleString()})`
+      );
+      note.font = Font.systemFont(10);
+      note.textColor = Color.lightGray();
+    } else {
+      const err = widget.addText("Data unavailable");
+      err.font = Font.systemFont(14);
+      err.textColor = Color.red();
+      widget.addSpacer(6);
+      const help = widget.addText("Run in app to see logs.");
+      help.font = Font.systemFont(10);
+      help.textColor = Color.lightGray();
+    }
+  }
+
+  return widget;
+}
+
+if (config.runsInWidget) {
+  let w = await createWidget();
+  Script.setWidget(w);
+  Script.complete();
+} else {
+  let w = await createWidget();
+  await w.presentSmall();
+  Script.complete();
+}
